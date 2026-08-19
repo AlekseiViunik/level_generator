@@ -132,18 +132,22 @@ def solve(
     boxes: List[Box],
     blocked: Set[Tuple[int, int]],
     max_depth: int = 30,
+    max_states: int = 150_000,
 ) -> int:
     """
     BFS по состояниям. Возвращает минимальное число подъёмов для доставки
     целевого ящика к выходу, или -1 если нет решения.
     Симулирует точную механику крана: anchor = x + (w-1)*0.5 (half-integer
     для width-2), перемещение пошагово влево/вправо с проверкой коридора.
+    Прерывается досрочно при превышении max_states.
     """
     initial: Tuple[Tuple[int, int], ...] = tuple((b.x, b.y) for b in boxes)
     queue: deque = deque([(initial, 0)])
     visited: Set[Tuple] = {initial}
 
     while queue:
+        if len(visited) > max_states:
+            return -1
         positions, depth = queue.popleft()
         if depth >= max_depth:
             continue
@@ -250,17 +254,21 @@ def solve_with_path(
     boxes: List[Box],
     blocked: Set[Tuple[int, int]],
     max_depth: int = 30,
+    max_states: int = 150_000,
 ) -> Optional[List[Move]]:
     """
     BFS идентичный solve(), но дополнительно отслеживает came_from
     для восстановления последовательности ходов.
     Возвращает список (box_idx, from_x, from_y, to_x, to_y) или None.
+    Прерывается досрочно при превышении max_states.
     """
     initial: Tuple = tuple((b.x, b.y) for b in boxes)
     came_from: Dict = {initial: None}  # state -> (parent_state, move) | None
     queue: deque = deque([(initial, 0)])
 
     while queue:
+        if len(came_from) > max_states:
+            return None
         positions, depth = queue.popleft()
         if depth >= max_depth:
             continue
