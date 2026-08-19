@@ -422,6 +422,38 @@ def _sig(boxes: List[Box], blocked: Set[Tuple[int, int]]) -> str:
     return f"{key}|{sorted(blocked)}"
 
 
+def load_existing_signatures(output_dir: str) -> Set[str]:
+    """Загружает подписи всех существующих уровней из output_dir."""
+    sigs: Set[str] = set()
+    if not os.path.isdir(output_dir):
+        return sigs
+    for fname in os.listdir(output_dir):
+        if not (fname.startswith("campaign_") and fname.endswith(".json")):
+            continue
+        fpath = os.path.join(output_dir, fname)
+        try:
+            with open(fpath, encoding="utf-8") as f:
+                data = json.load(f)
+            boxes = [
+                Box(
+                    b.get("id", ""),
+                    b["x"],
+                    b["y"],
+                    b["width"],
+                    b["height"],
+                    b.get("isTarget", False),
+                )
+                for b in data["boxes"]
+            ]
+            blocked: Set[Tuple[int, int]] = {
+                (c["x"], c["y"]) for c in data.get("blockedCells", [])
+            }
+            sigs.add(_sig(boxes, blocked))
+        except Exception:
+            pass
+    return sigs
+
+
 def get_next_id() -> int:
     """Возвращает следующий номер campaign-уровня."""
     existing = []
@@ -693,7 +725,7 @@ class App(tk.Tk):
         min_fill: float = self._vars["fill"].get()
 
         rng = random.Random()
-        seen: Set[str] = set()
+        seen: Set[str] = load_existing_signatures(OUTPUT_DIR)
         next_id = get_next_id()
         ok = 0
 
@@ -703,7 +735,10 @@ class App(tk.Tk):
         )
         self._log(
             f"Ходов: {min_moves}–{max_moves},"
-            f"заполненность ≥ {min_fill:.0f}%\n"
+            f"заполненность ≥ {min_fill:.0f}%"
+        )
+        self._log(
+            f"Уже существует уровней: {len(seen)} (дубли будут пропущены)\n"
         )
 
         os.makedirs(OUTPUT_DIR, exist_ok=True)
