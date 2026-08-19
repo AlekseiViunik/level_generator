@@ -8,7 +8,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext
 from collections import deque
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # ─── Константы ───────────────────────────────────────────────────────────────
 GRID_W = 6
@@ -546,11 +546,11 @@ class App(tk.Tk):
         super().__init__()
         self.title("Генератор уровней — Storage Controller")
         self.resizable(False, False)
-        self._vars: dict = {}
+        self._vars: Dict[str, tk.Variable] = {}
         self._build_ui()
 
     def _build_ui(self) -> None:
-        p = {"padx": 8, "pady": 4}
+        p: Dict[str, Any] = {"padx": 8, "pady": 4}
 
         # ── Панель параметров ──
         frm = ttk.LabelFrame(self, text="Параметры", padding=10)
