@@ -594,7 +594,9 @@ class App(tk.Tk):
         ).grid(row=2, column=1, sticky="w", **p)
         self._vars["fill"] = fill_v
 
-        ttk.Label(frm, text="Мин. ходов:").grid(row=3, column=0, sticky="w", **p)
+        ttk.Label(frm, text="Мин. ходов:").grid(
+            row=3, column=0, sticky="w", **p
+        )
         min_v = tk.IntVar(value=3)
         ttk.Spinbox(
             frm,
@@ -608,7 +610,9 @@ class App(tk.Tk):
         )
         self._vars["min_moves"] = min_v
 
-        ttk.Label(frm, text="Макс. ходов:").grid(row=4, column=0, sticky="w", **p)
+        ttk.Label(frm, text="Макс. ходов:").grid(
+            row=4, column=0, sticky="w", **p
+        )
         max_v = tk.IntVar(value=12)
         ttk.Spinbox(
             frm,
@@ -685,7 +689,10 @@ class App(tk.Tk):
         next_id = get_next_id()
         ok = 0
 
-        self._log(f"Генерация {count} уровней, начиная с campaign_{next_id:02d}...")
+        self._log(
+            f"Генерация {count} уровней,"
+            f" начиная с campaign_{next_id:02d}..."
+        )
         self._log(
             f"Ходов: {min_moves}–{max_moves},"
             f"заполненность ≥ {min_fill:.0f}%\n"
@@ -697,7 +704,8 @@ class App(tk.Tk):
             result = generate_one(min_moves, max_moves, min_fill, rng, seen)
             if result is None:
                 self._log(
-                    f"[{i+1}/{count}]  — пропуск (не удалось подобрать уровень)"
+                    f"[{i + 1}/{count}]  — пропуск"
+                    " (не удалось подобрать уровень)"
                 )
             else:
                 boxes, blocked, min_sol = result
@@ -705,7 +713,11 @@ class App(tk.Tk):
                 data = level_to_dict(boxes, blocked, min_sol, lid)
                 out_path = os.path.join(OUTPUT_DIR, f"{lid}.json")
                 with open(out_path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+                    json.dump(
+                        data, f,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
                 sol_path = solve_with_path(
                     boxes, blocked, max_depth=max_moves + 6
                 )
@@ -727,6 +739,6 @@ class App(tk.Tk):
         self.after(0, self._gen_btn.configure, {"state": "normal"})
 
 
-# ─── Точка входа ──────────────────────────────────────────────────────────────
+# ─── Точка входа ─────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     App().mainloop()
