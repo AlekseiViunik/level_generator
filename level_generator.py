@@ -1027,11 +1027,13 @@ class App(tk.Tk):
 
         ttk.Label(frm, text="Режим:").grid(row=0, column=0, sticky="w", **p)
         mode_v = tk.StringVar(value="Standard")
-        ttk.Combobox(
+        mode_combo = ttk.Combobox(
             frm, textvariable=mode_v,
             values=["Standard", "Color Matching"],
             state="readonly", width=14,
-        ).grid(row=0, column=1, sticky="w", **p)
+        )
+        mode_combo.grid(row=0, column=1, sticky="w", **p)
+        mode_combo.bind("<<ComboboxSelected>>", self._on_mode_changed)
         self._vars["mode"] = mode_v
 
         ttk.Label(frm, text="Количество уровней:").grid(
@@ -1096,16 +1098,17 @@ class App(tk.Tk):
         )
         self._vars["max_moves"] = max_v
 
-        ttk.Label(frm, text="Количество цветов:").grid(
-            row=5, column=0, sticky="w", **p
-        )
+        self._colors_label = ttk.Label(frm, text="Количество цветов:")
         colors_v = tk.StringVar(value=str(MIN_COLOR_COUNT))
-        ttk.Combobox(
+        self._colors_combo = ttk.Combobox(
             frm, textvariable=colors_v,
             values=[str(n) for n in range(MIN_COLOR_COUNT, MAX_COLOR_COUNT + 1)],
             state="readonly", width=10,
-        ).grid(row=5, column=1, sticky="w", **p)
+        )
+        self._colors_row = 5
+        self._colors_grid_kwargs = p
         self._vars["colors"] = colors_v
+        self._on_mode_changed()  # показать/скрыть по стартовому режиму
 
         # ── Кнопка ──
         self._gen_btn = ttk.Button(
@@ -1128,6 +1131,21 @@ class App(tk.Tk):
             lf, width=66, height=22, state="disabled",
         )
         self._log_box.pack(fill="both", expand=True)
+
+    def _on_mode_changed(self, event: Any = None) -> None:
+        """Показывает поле «Количество цветов» только для Color Matching."""
+        if self._vars["mode"].get() == "Color Matching":
+            self._colors_label.grid(
+                row=self._colors_row, column=0, sticky="w",
+                **self._colors_grid_kwargs
+            )
+            self._colors_combo.grid(
+                row=self._colors_row, column=1, sticky="w",
+                **self._colors_grid_kwargs
+            )
+        else:
+            self._colors_label.grid_remove()
+            self._colors_combo.grid_remove()
 
     # ── Thread-safe хелперы ──
     def _log(self, msg: str) -> None:
