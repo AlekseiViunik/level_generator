@@ -1167,10 +1167,13 @@ def generate_one_color(
 ) -> Optional[Tuple[List[Box], Set[Tuple[int, int]], int]]:
     """
     Как generate_one(), но для режима Color Matching: каждому ящику
-    назначается цвет. Ящик, вставший на пол (y=0) или на цель, получает
-    случайный цвет из палитры уровня; ящик, вставший на другие ящики,
-    обязан получить их цвет — если опора под кандидатной позицией
-    разноцветная, эта позиция для цветного режима отбрасывается.
+    назначается случайный цвет из палитры уровня, независимо от цвета
+    того, на что он встал. Правило «класть можно только на ящик своего
+    цвета (или на пол)» — это ограничение хода при игре/решении
+    (см. color_fits_support() в solve_color()), а не ограничение
+    начальной раскладки: по условию задачи ящики разных цветов могут
+    стартово стоять друг на друге как угодно, лишь бы уровень был
+    физически корректен (полная опора, без пересечений) и решаем.
     """
     level_colors = rng.sample(COLOR_PALETTE, color_count)
 
@@ -1195,7 +1198,7 @@ def generate_one_color(
             for bc in cols:
                 blocked.add((bc, rng.choice([3, 4])))
 
-        # 3. Добавляем случайные ящики (цвет зависит от опоры)
+        # 3. Добавляем случайные ящики (цвет не зависит от опоры)
         max_extra = rng.randint(2, 9)
         target_cols = set(range(tx, tx + tw))
 
@@ -1207,19 +1210,13 @@ def generate_one_color(
             candidates = []
             for x in range(GRID_W - w + 1):
                 y = placement_y(occ, blocked, x, w, h)
-                if y is None:
-                    continue
-                if y == 0:
-                    candidates.append((x, y, None))
-                    continue
-                support = uniform_support_color(occ, boxes, x, w, y)
-                if support is not None:
-                    candidates.append((x, y, support))
+                if y is not None:
+                    candidates.append((x, y))
             if not candidates:
                 continue
 
             over_target = [
-                (x, y, c) for (x, y, c) in candidates
+                (x, y) for (x, y) in candidates
                 if any(col in target_cols for col in range(x, x + w))
             ]
             pool = (
@@ -1227,12 +1224,8 @@ def generate_one_color(
                 if over_target and rng.random() < 0.65
                 else candidates
             )
-            cx, cy, forced_color = rng.choice(pool)
-            color = (
-                forced_color
-                if forced_color is not None
-                else rng.choice(level_colors)
-            )
+            cx, cy = rng.choice(pool)
+            color = rng.choice(level_colors)
             boxes.append(
                 Box(f"box_{len(boxes)}", cx, cy, w, h, False, color)
             )
