@@ -401,6 +401,8 @@ def solve_color(
                 to_y = placement_y(occ_wo, blocked, left, b.w, b.h)
                 if to_y is None:
                     continue
+                if b.color is None:
+                    continue  # цветной ящик всегда имеет цвет
                 if not color_fits_support(
                     occ_wo, boxes, left, b.w, to_y, b.color
                 ):
@@ -620,6 +622,8 @@ def solve_color_with_path(
                 to_y = placement_y(occ_wo, blocked, left, b.w, b.h)
                 if to_y is None:
                     continue
+                if b.color is None:
+                    continue  # цветной ящик всегда имеет цвет
                 if not color_fits_support(
                     occ_wo, boxes, left, b.w, to_y, b.color
                 ):
@@ -679,7 +683,7 @@ def _worker_top_box(
     positions: WorkerPositions,
     x: int,
 ) -> Optional[Tuple[int, Tuple[int, int]]]:
-    """(индекс, позиция) верхнего установленного ящика в колонне x, либо None."""
+    """(Индекс, позиция) верхнего ящика в колонне x, либо None."""
     best: Optional[Tuple[int, Tuple[int, int]]] = None
     for i, pos in enumerate(positions):
         if pos is not None and pos[0] == x:
@@ -709,7 +713,9 @@ def _worker_transitions(
             continue
         theight = _worker_column_height(positions, tx)
         if theight <= wy:
-            new_state: WorkerState = (positions, tx, theight, direction, carried)
+            new_state: WorkerState = (
+                positions, tx, theight, direction, carried
+            )
             results.append((new_state, ("move", direction), False))
 
     # Jump: в соседнюю колонну, подъём ограничен в зависимости от переноски.
@@ -1057,7 +1063,10 @@ def load_existing_signatures_worker(output_dir: str) -> Set[str]:
             with open(fpath, encoding="utf-8") as f:
                 data = json.load(f)
             boxes = [
-                Box(b.get("id", ""), b["x"], b["y"], 1, 1, b.get("isTarget", False))
+                Box(
+                    b.get("id", ""), b["x"], b["y"], 1, 1,
+                    b.get("isTarget", False),
+                )
                 for b in data["boxes"]
             ]
             facing = -1 if data.get("workerFacing") == "left" else 1
@@ -1537,7 +1546,10 @@ class App(tk.Tk):
         colors_v = tk.StringVar(value=str(MIN_COLOR_COUNT))
         self._colors_combo = ttk.Combobox(
             frm, textvariable=colors_v,
-            values=[str(n) for n in range(MIN_COLOR_COUNT, MAX_COLOR_COUNT + 1)],
+            values=[
+                str(n)
+                for n in range(MIN_COLOR_COUNT, MAX_COLOR_COUNT + 1)
+            ],
             state="readonly", width=10,
         )
         self._colors_row = 5
@@ -1684,7 +1696,9 @@ class App(tk.Tk):
                     min_moves, max_moves, min_fill, color_count, rng, seen
                 )
             else:
-                result = generate_one(min_moves, max_moves, min_fill, rng, seen)
+                result = generate_one(
+                    min_moves, max_moves, min_fill, rng, seen
+                )
 
             if result is None:
                 self._log(
