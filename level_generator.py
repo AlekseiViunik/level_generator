@@ -57,11 +57,104 @@ ALLOWED_SIZES: List[Tuple[int, int]] = [
 ]
 TARGET_SIZES: List[Tuple[int, int]] = [(1, 1), (2, 1), (1, 2), (2, 2)]
 
+# Issue #15: at 3-4 colors, extra (non-target) boxes are limited to
+# width 1 - empirically, allowing width-2 boxes (let alone the 3-unit
+# ALLOWED_SIZES entries) makes color-matching layouts far less likely to
+# be solvable at all under the color-support rule, and when solvable,
+# shortens the typical solution. Dropping width-2 raised the hit rate
+# for 15+/12+-move, 3-4-color levels by roughly 7-20x in testing. Only
+# affects extra boxes - the target keeps using TARGET_SIZES as before.
+COLOR_RESTRICTED_EXTRA_SIZES: List[Tuple[int, int]] = [(1, 1), (1, 2)]
+# Threshold at which the "most boxes must actually move" rule below
+# kicks in - empirically the more natural cutoff for capped-size
+# color levels turned out to be 12, not the originally proposed 15.
+COLOR_LONG_SOLUTION_THRESHOLD = 12
+COLOR_MIN_MOVED_FRACTION = 0.8
+# How many different colorings to try against the SAME physical layout
+# before giving up on it and building a new one from scratch - cheap
+# (no re-placement needed) relative to a full re-generation, and was
+# the single biggest lever found for making 3-4-color, long-solution
+# levels generate at all (0/60000 fresh attempts -> ~1/900 with this).
+COLOR_RECOLOR_ATTEMPTS = 30
+
+# Минимальная доля площади (сумма w*h), которую должен занимать каждый
+# используемый цвет, от суммарной площади всех ящиков уровня - защита от
+# уровней, где один цвет представлен единственным маленьким ящиком.
+COLOR_MIN_AREA_FRACTION: Dict[int, float] = {2: 0.30, 3: 0.20, 4: 0.10}
+# Минимальное количество ящиков каждого цвета - только при 2 и 3 цветах.
+# При 2 цветах порог зависит от общего числа ящиков на уровне; при
+# 3 цветах он действует только начиная с 8 ящиков (при меньшем их
+# числе действует только комбинированное правило ниже).
+COLOR_MIN_BOXES_PER_COLOR_SMALL_LEVEL = 2  # <8 ящиков всего (только 2 цвета)
+COLOR_MIN_BOXES_PER_COLOR_LARGE_LEVEL = 3  # >=8 ящиков всего (только 2 цвета)
+COLOR_MIN_BOXES_PER_COLOR_3COLORS_LARGE_LEVEL = 2  # >=8 ящиков, 3 цвета
+# Комбинированные правила (всегда, независимо от общего числа ящиков):
+# любые 2 из 3 цветов вместе - не менее стольки-то ящиков; любые 3 из 4
+# цветов вместе - не менее стольки-то ящиков.
+COLOR_MIN_BOXES_ANY_2_OF_3_COLORS = 3
+COLOR_MIN_BOXES_ANY_3_OF_4_COLORS = 4
+
 # Цвета соответствуют BoxColor в storage_controller (без None).
 # Игра поддерживает 2-4 цвета на уровень (ColorMatchingGameRules).
 COLOR_PALETTE: List[str] = ["red", "blue", "green", "yellow"]
 MIN_COLOR_COUNT = 2
 MAX_COLOR_COUNT = 4
+
+
+def _color_balance_ok(boxes: List["Box"], color_count: int) -> bool:
+    """
+    Проверяет минимальное представление каждого цвета среди boxes
+    (все boxes уже раскрашены и используют ровно color_count разных
+    цветов - это гарантируется вызывающим кодом до вызова этой функции).
+    См. COLOR_MIN_AREA_FRACTION и COLOR_MIN_BOXES_* выше.
+    """
+    total_boxes = len(boxes)
+    total_area = sum(b.w * b.h for b in boxes)
+    counts: Dict[str, int] = {}
+    areas: Dict[str, int] = {}
+    for b in boxes:
+        counts[b.color] = counts.get(b.color, 0) + 1
+        areas[b.color] = areas.get(b.color, 0) + b.w * b.h
+
+    min_fraction = COLOR_MIN_AREA_FRACTION[color_count]
+    for area in areas.values():
+        if area / total_area < min_fraction:
+            return False
+
+    if color_count == 2:
+        min_count = (
+            COLOR_MIN_BOXES_PER_COLOR_LARGE_LEVEL
+            if total_boxes >= 8
+            else COLOR_MIN_BOXES_PER_COLOR_SMALL_LEVEL
+        )
+        for count in counts.values():
+            if count < min_count:
+                return False
+
+    elif color_count == 3:
+        if total_boxes >= 8:
+            for count in counts.values():
+                if count < COLOR_MIN_BOXES_PER_COLOR_3COLORS_LARGE_LEVEL:
+                    return False
+        colors = list(counts.keys())
+        for i in range(len(colors)):
+            for j in range(i + 1, len(colors)):
+                pair_count = counts[colors[i]] + counts[colors[j]]
+                if pair_count < COLOR_MIN_BOXES_ANY_2_OF_3_COLORS:
+                    return False
+
+    elif color_count == 4:
+        colors = list(counts.keys())
+        for i in range(len(colors)):
+            for j in range(i + 1, len(colors)):
+                for k in range(j + 1, len(colors)):
+                    trio_count = (
+                        counts[colors[i]] + counts[colors[j]] + counts[colors[k]]
+                    )
+                    if trio_count < COLOR_MIN_BOXES_ANY_3_OF_4_COLORS:
+                        return False
+
+    return True
 
 Occ = Dict[Tuple[int, int], int]  # (x, y) → индекс ящика
 
@@ -1173,30 +1266,53 @@ def generate_one_color(
     rng: random.Random,
     seen: Set[str],
     attempts: int = 2000,
+    recolor_attempts: int = COLOR_RECOLOR_ATTEMPTS,
 ) -> Optional[Tuple[List[Box], Set[Tuple[int, int]], int]]:
     """
-    Как generate_one(), но для режима Color Matching: каждому ящику
-    назначается случайный цвет из палитры уровня, независимо от цвета
-    того, на что он встал. Правило «класть можно только на ящик своего
-    цвета (или на пол)» — это ограничение хода при игре/решении
-    (см. color_fits_support() в solve_color()), а не ограничение
-    начальной раскладки: по условию задачи ящики разных цветов могут
-    стартово стоять друг на друге как угодно, лишь бы уровень был
-    физически корректен (полная опора, без пересечений) и решаем.
+    Как generate_one(), но для режима Color Matching. Раскладка (позиции
+    и размеры ящиков) строится независимо от цвета, а цвет назначается
+    отдельным, внутренним циклом ПОСЛЕ того как раскладка физически
+    готова: для одной и той же раскладки перебирается до
+    recolor_attempts разных раскрасок, прежде чем раскладка целиком
+    отбраковывается и строится заново. Раскраска дёшева (без повторного
+    подбора позиций) относительно перестроения раскладки, а подбор
+    подходящей раскраски для уже физически готовой раскладки оказался
+    на порядки эффективнее, чем откатывать всё целиком при неудаче
+    (см. issue #15).
+
+    Правило «класть можно только на ящик своего цвета (или на пол)» —
+    это ограничение хода при игре/решении (см. color_fits_support() в
+    solve_color()), а не ограничение начальной раскладки: по условию
+    задачи ящики разных цветов могут стартово стоять друг на друге как
+    угодно, лишь бы уровень был физически корректен (полная опора, без
+    пересечений) и решаем.
+
+    При color_count in (3, 4): обычные (не целевые) ящики берутся из
+    COLOR_RESTRICTED_EXTRA_SIZES (только ширина 1), а если найденное
+    решение требует COLOR_LONG_SOLUTION_THRESHOLD ходов и больше,
+    дополнительно требуется, чтобы минимум COLOR_MIN_MOVED_FRACTION
+    ящиков (от общего числа, включая цель) были сдвинуты хотя бы раз.
+
+    Каждая раскраска также проверяется на минимальное представление
+    каждого цвета (площадь и количество ящиков) - см.
+    _color_balance_ok() / COLOR_MIN_AREA_FRACTION / COLOR_MIN_BOXES_*.
     """
     level_colors = rng.sample(COLOR_PALETTE, color_count)
+    extra_sizes_pool = (
+        COLOR_RESTRICTED_EXTRA_SIZES
+        if color_count in (3, 4)
+        else ALLOWED_SIZES
+    )
 
     for _ in range(attempts):
-        # 1. Выбираем размер, позицию и цвет целевого ящика
+        # 1. Выбираем размер и позицию целевого ящика (цвет — позже)
         tw, th = rng.choice(TARGET_SIZES)
         valid_tx = [x for x in range(GRID_W - tw + 1) if x + tw < GRID_W]
         if not valid_tx:
             continue
         tx = rng.choice(valid_tx)
 
-        target = Box(
-            "target", tx, 0, tw, th, True, rng.choice(level_colors)
-        )
+        target = Box("target", tx, 0, tw, th, True, None)
         boxes: List[Box] = [target]
         blocked: Set[Tuple[int, int]] = set()
 
@@ -1207,12 +1323,12 @@ def generate_one_color(
             for bc in cols:
                 blocked.add((bc, rng.choice([3, 4])))
 
-        # 3. Добавляем случайные ящики (цвет не зависит от опоры)
+        # 3. Добавляем случайные ящики (позиция и размер, без цвета)
         max_extra = rng.randint(2, 9)
         target_cols = set(range(tx, tx + tw))
 
         for _ in range(max_extra):
-            w, h = rng.choice(ALLOWED_SIZES)
+            w, h = rng.choice(extra_sizes_pool)
             pos_t = tuple((b.x, b.y) for b in boxes)
             occ = build_occ(boxes, pos_t)
 
@@ -1234,32 +1350,57 @@ def generate_one_color(
                 else candidates
             )
             cx, cy = rng.choice(pool)
-            color = rng.choice(level_colors)
             boxes.append(
-                Box(f"box_{len(boxes)}", cx, cy, w, h, False, color)
+                Box(f"box_{len(boxes)}", cx, cy, w, h, False, None)
             )
 
-        # 4. Проверка минимальной заполненности
+        # 4. Проверка минимальной заполненности (не зависит от цвета)
         fill = sum(b.w * b.h for b in boxes) / (GRID_W * GRID_H) * 100
         if fill < min_fill:
             continue
 
-        # 5. Уровень должен реально использовать все выбранные цвета
-        if len({b.color for b in boxes}) != color_count:
-            continue
+        # 5-8. Раскладка готова физически - перебираем раскраски для
+        # НЕЁ ЖЕ, вместо того чтобы откатывать всю раскладку целиком.
+        for _ in range(recolor_attempts):
+            for b in boxes:
+                b.color = rng.choice(level_colors)
 
-        # 6. BFS: проверка решаемости и подсчёт минимальных ходов
-        min_sol = solve_color(boxes, blocked, max_depth=max_moves + 6)
-        if min_sol < 0 or not (min_moves <= min_sol <= max_moves):
-            continue
+            # 5. Уровень должен реально использовать все выбранные цвета
+            if len({b.color for b in boxes}) != color_count:
+                continue
 
-        # 7. Проверка уникальности (цвет входит в подпись)
-        sig = _sig(boxes, blocked, include_color=True)
-        if sig in seen:
-            continue
-        seen.add(sig)
+            # 5.5. Минимальное представление каждого цвета (площадь и
+            # количество ящиков) - см. COLOR_MIN_AREA_FRACTION и
+            # COLOR_MIN_BOXES_* выше. Дёшево, проверяем до BFS.
+            if not _color_balance_ok(boxes, color_count):
+                continue
 
-        return boxes, blocked, min_sol
+            # 6. BFS: проверка решаемости и подсчёт минимальных ходов
+            min_sol = solve_color(boxes, blocked, max_depth=max_moves + 6)
+            if min_sol < 0 or not (min_moves <= min_sol <= max_moves):
+                continue
+
+            # 7. При 3-4 цветах и длинном решении - доля сдвинутых ящиков
+            if (
+                color_count in (3, 4)
+                and min_sol >= COLOR_LONG_SOLUTION_THRESHOLD
+            ):
+                path = solve_color_with_path(
+                    boxes, blocked, max_depth=max_moves + 6
+                )
+                if path is None:
+                    continue
+                moved_fraction = len({m[0] for m in path}) / len(boxes)
+                if moved_fraction < COLOR_MIN_MOVED_FRACTION:
+                    continue
+
+            # 8. Проверка уникальности (цвет входит в подпись)
+            sig = _sig(boxes, blocked, include_color=True)
+            if sig in seen:
+                continue
+            seen.add(sig)
+
+            return boxes, blocked, min_sol
 
     return None
 
