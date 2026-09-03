@@ -1432,7 +1432,13 @@ def generate_one_worker(
         occ: Occ = {}
         placements: List[Tuple[int, int]] = []
 
-        total_boxes = rng.randint(3, 10)
+        # Upper bound raised from 10: with a 6x5 grid and the "each row
+        # must keep at least one free cell" placement rule below, the
+        # real physical ceiling is 5 boxes/row * 5 rows = 25 (83% fill).
+        # 22 leaves a bit of headroom under that so the RNG doesn't have
+        # to hit the exact ceiling to succeed, while comfortably covering
+        # fill requests up to ~70%.
+        total_boxes = rng.randint(3, 22)
         for _ in range(total_boxes):
             candidates = []
             for x in range(GRID_W):
