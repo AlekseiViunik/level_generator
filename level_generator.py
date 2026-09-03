@@ -1208,7 +1208,14 @@ def generate_one(
                 blocked.add((bc, rng.choice([3, 4])))
 
         # 3. Добавляем случайные ящики
-        max_extra = rng.randint(2, 9)
+        # Потолок поднят с 9 до 19 (issue: генератор долго/безуспешно
+        # подбирал раскладку под высокий min_fill, имея всего 10 ящиков
+        # в распоряжении). Эмпирически cap=20 - разумный компромисс:
+        # заметно расширяет достижимый fill% (60-80% вместо ~60%
+        # максимума), а более высокий потолок (25) не помогает и даже
+        # замедляет генерацию (BFS дороже на большем числе ящиков) без
+        # роста успешности.
+        max_extra = rng.randint(2, 19)
         target_cols = set(range(tx, tx + tw))
 
         for _ in range(max_extra):
@@ -1324,7 +1331,8 @@ def generate_one_color(
                 blocked.add((bc, rng.choice([3, 4])))
 
         # 3. Добавляем случайные ящики (позиция и размер, без цвета)
-        max_extra = rng.randint(2, 9)
+        # Тот же потолок, что и в generate_one() - см. комментарий там.
+        max_extra = rng.randint(2, 19)
         target_cols = set(range(tx, tx + tw))
 
         for _ in range(max_extra):
