@@ -1651,7 +1651,8 @@ class App(tk.Tk):
         ).grid(row=2, column=1, sticky="w", **p)
         self._vars["fill"] = fill_v
 
-        ttk.Label(frm, text="Мин. ходов:").grid(
+        self._min_moves_label = ttk.Label(frm, text="Мин. ходов:")
+        self._min_moves_label.grid(
             row=3, column=0, sticky="w", **p
         )
         min_v = tk.IntVar(value=3)
@@ -1667,7 +1668,8 @@ class App(tk.Tk):
         )
         self._vars["min_moves"] = min_v
 
-        ttk.Label(frm, text="Макс. ходов:").grid(
+        self._max_moves_label = ttk.Label(frm, text="Макс. ходов:")
+        self._max_moves_label.grid(
             row=4, column=0, sticky="w", **p
         )
         max_v = tk.IntVar(value=12)
@@ -1744,9 +1746,13 @@ class App(tk.Tk):
         if mode == "Worker":
             self._vars["min_moves"].set(10)
             self._vars["max_moves"].set(35)
+            self._min_moves_label.configure(text="Мин. действий:")
+            self._max_moves_label.configure(text="Макс. действий:")
         else:
             self._vars["min_moves"].set(3)
             self._vars["max_moves"].set(12)
+            self._min_moves_label.configure(text="Мин. ходов:")
+            self._max_moves_label.configure(text="Макс. ходов:")
 
     # ── Thread-safe хелперы ──
     def _log(self, msg: str) -> None:
