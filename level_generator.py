@@ -127,8 +127,13 @@ def _color_balance_ok(boxes: List["Box"], color_count: int) -> bool:
     counts: Dict[str, int] = {}
     areas: Dict[str, int] = {}
     for b in boxes:
-        counts[b.color] = counts.get(b.color, 0) + 1
-        areas[b.color] = areas.get(b.color, 0) + b.w * b.h
+        # Предусловие функции - все boxes уже раскрашены (см. докстрайку
+        # выше), так что тут b.color гарантированно не None; assert
+        # сужает тип для type checker'а (b.color: Optional[str]).
+        color = b.color
+        assert color is not None
+        counts[color] = counts.get(color, 0) + 1
+        areas[color] = areas.get(color, 0) + b.w * b.h
 
     min_fraction = COLOR_MIN_AREA_FRACTION[color_count]
     for area in areas.values():
@@ -163,12 +168,15 @@ def _color_balance_ok(boxes: List["Box"], color_count: int) -> bool:
             for j in range(i + 1, len(colors)):
                 for k in range(j + 1, len(colors)):
                     trio_count = (
-                        counts[colors[i]] + counts[colors[j]] + counts[colors[k]]
+                        counts[colors[i]]
+                        + counts[colors[j]]
+                        + counts[colors[k]]
                     )
                     if trio_count < COLOR_MIN_BOXES_ANY_3_OF_4_COLORS:
                         return False
 
     return True
+
 
 Occ = Dict[Tuple[int, int], int]  # (x, y) → индекс ящика
 
@@ -898,7 +906,8 @@ def _worker_row_fill_denied(
         positions, boxes, row
     ):
         return False
-    return _worker_row_occupied(occ, blocked, row, width) + cells_added >= width
+    occupied = _worker_row_occupied(occ, blocked, row, width)
+    return occupied + cells_added >= width
 
 
 def _worker_start_column_max_rise(
@@ -992,7 +1001,9 @@ def _worker_can_jump(
     carried_box = boxes[carried] if carried >= 0 else None
     # "Тяжёлый" переносимый ящик - любой не 1x1 (широкий ИЛИ высокий),
     # как CellCount==2 в C#.
-    carried_is_heavy = carried_box is not None and carried_box.w * carried_box.h == 2
+    carried_is_heavy = (
+        carried_box is not None and carried_box.w * carried_box.h == 2
+    )
 
     raw_max_rise = (
         0 if carried_is_heavy
@@ -1019,7 +1030,9 @@ def _worker_can_jump(
         )
         effective_max_rise = min(step_max_rise, ceiling_cap, start_column_cap)
 
-        candidate_height = _worker_surface_height(occ, blocked, candidate_column)
+        candidate_height = _worker_surface_height(
+            occ, blocked, candidate_column
+        )
         if candidate_height - wy > effective_max_rise:
             break
 
@@ -1122,7 +1135,9 @@ def _worker_can_place_single(
     if column_height > wy + 1:
         return None
 
-    is_delivery = box.is_target and adjacent_x == width - 1 and column_height == 0
+    is_delivery = (
+        box.is_target and adjacent_x == width - 1 and column_height == 0
+    )
     is_tall = box.h == 2
     if _worker_row_fill_denied(
         occ, blocked, positions, boxes, width, column_height, 1, is_tall
@@ -1486,7 +1501,10 @@ def write_solution_worker(
     lines.append("Начальные позиции:")
     for b in boxes:
         target_mark = "  [цель]" if b.is_target else ""
-        lines.append(f"  {b.id:<10} ({b.w}x{b.h})  x={b.x}, y={b.y}{target_mark}")
+        lines.append(
+            f"  {b.id:<10} ({b.w}x{b.h})"
+            f"  x={b.x}, y={b.y}{target_mark}"
+        )
     lines.append("")
     lines.append("Решение:")
     for step, move in enumerate(path, 1):
@@ -1593,7 +1611,10 @@ def _sig_worker(
     key = tuple(
         sorted((b.w, b.h, b.x, b.y, int(b.is_target)) for b in boxes)
     )
-    return f"{key}|blocked={sorted(blocked)}|worker=({start_x},{start_y},{facing})"
+    return (
+        f"{key}|blocked={sorted(blocked)}"
+        f"|worker=({start_x},{start_y},{facing})"
+    )
 
 
 def load_existing_signatures_worker(output_dir: str) -> Set[str]:
