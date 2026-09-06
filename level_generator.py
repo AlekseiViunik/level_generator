@@ -1107,6 +1107,17 @@ def _worker_can_pick_up(
     if not reach_ok:
         return None
 
+    # _worker_top_box_at смотрит только на колонну adjacent_x - широкий
+    # ящик мог быть "прижат" другим ящиком через СОСЕДНЮЮ свою колонну
+    # (например два ящика 2x1 делят одну общую колонну сверху/снизу).
+    # Такой ящик подбирать нельзя ни с какой стороны (аналог фикса в
+    # WorkerRules.CanPickUp).
+    box_top = box_y + box.h
+    if box_top < GRID_H:
+        for column in range(pos[0], pos[0] + box.w):
+            if (column, box_top) in occ or (column, box_top) in blocked:
+                return None
+
     worker_column = round(wx)
     for row_offset in range(1, box.h + 1):
         carried_row = wy + row_offset
@@ -1395,17 +1406,28 @@ def solve_worker_with_path(
     return None
 
 
-def _moves_word(n: int) -> str:
-    """Правильная форма слова 'ход' для числа n."""
+def _ru_plural(n: int, one: str, few: str, many: str) -> str:
+    """Верная форма русского слова для числа n (1 / 2-4 / 5+, с
+    исключением 11-19, которые всегда "many")."""
     mod100 = n % 100
     mod10 = n % 10
     if 11 <= mod100 <= 19:
-        return "ходов"
+        return many
     if mod10 == 1:
-        return "ход"
+        return one
     if 2 <= mod10 <= 4:
-        return "хода"
-    return "ходов"
+        return few
+    return many
+
+
+def _moves_word(n: int) -> str:
+    """Правильная форма слова 'ход' для числа n."""
+    return _ru_plural(n, "ход", "хода", "ходов")
+
+
+def _boxes_word(n: int) -> str:
+    """Правильная форма слова 'ящик' для числа n."""
+    return _ru_plural(n, "ящик", "ящика", "ящиков")
 
 
 def write_solution(
@@ -1451,18 +1473,49 @@ def write_solution(
         f.write("\n".join(lines) + "\n")
 
 
-_WORKER_MOVE_LABELS = {
-    ("move", -1): "идёт влево",
-    ("move", 1): "идёт вправо",
-    ("face", -1): "разворачивается влево",
-    ("face", 1): "разворачивается вправо",
-    ("jump", -1): "прыжок влево",
-    ("jump", 1): "прыжок вправо",
-    ("pickup", -1): "берёт ящик",
-    ("pickup", 1): "берёт ящик",
-    ("putdown", -1): "кладёт ящик",
-    ("putdown", 1): "кладёт ящик",
-}
+def summarize_worker_deliveries(
+    boxes: List[Box],
+    blocked: Set[Tuple[int, int]],
+    width: int,
+    start_x: int,
+    start_y: int,
+    facing: int,
+    path: List[WorkerMove],
+) -> List[Tuple[str, Tuple[int, int], Tuple[int, int]]]:
+    """
+    Реплеит path через _worker_transitions() и сворачивает его до
+    списка (id ящика, откуда, куда) - по одной записи на каждый цикл
+    "взял-положил", в порядке решения. Не показывает промежуточные
+    move/jump/face - только откуда и куда переместился каждый ящик,
+    как и просили: "достаточно координат ящика и места, куда положить".
+    """
+    positions: WorkerPositions = tuple((b.x, b.y) for b in boxes)
+    state: WorkerState = (positions, float(start_x), start_y, facing, -1)
+    deliveries: List[Tuple[str, Tuple[int, int], Tuple[int, int]]] = []
+    pickup_source: Dict[int, Tuple[int, int]] = {}
+
+    for move in path:
+        transitions = _worker_transitions(boxes, blocked, width, state)
+        new_state, _matched_move, _delivered = next(
+            t for t in transitions if t[1] == move
+        )
+        old_positions, _, _, _, old_carried = state
+        new_positions, _, _, _, new_carried = new_state
+
+        if move[0] == "pickup":
+            source_before_pickup = old_positions[new_carried]
+            assert source_before_pickup is not None
+            pickup_source[new_carried] = source_before_pickup
+        elif move[0] == "putdown":
+            box_index = old_carried
+            source = pickup_source.pop(box_index)
+            destination = new_positions[box_index]
+            assert destination is not None
+            deliveries.append((boxes[box_index].id, source, destination))
+
+        state = new_state
+
+    return deliveries
 
 
 def write_solution_worker(
@@ -1475,10 +1528,21 @@ def write_solution_worker(
     path: List[WorkerMove],
     solutions_dir: str = WORKER_SOLUTIONS_DIR,
 ) -> None:
-    """Записывает решение уровня режима Worker в solutions_dir/<lid>.txt."""
-    n = len(path)
+    """Записывает решение уровня режима Worker в solutions_dir/<lid>.txt -
+    списком "какой ящик откуда куда переставить", без промежуточных
+    move/jump/face-действий (см. summarize_worker_deliveries())."""
+    deliveries = summarize_worker_deliveries(
+        boxes, blocked, GRID_W, start_x, start_y, facing, path
+    )
+    # Заголовок описывает сам УРОВЕНЬ (сколько в нём ящиков всего), а не
+    # решение - число доставок может быть и меньше (не каждый ящик
+    # нужно трогать), и больше (один и тот же ящик иногда переставляют
+    # дважды, освобождая место для другого), поэтому это два разных
+    # числа: len(boxes) для заголовка, len(deliveries) для нумерации
+    # шагов ниже.
+    box_count = len(boxes)
     lines = [
-        f"{lid}  |  {n} {_moves_word(n)}  |  "
+        f"{lid}  |  {box_count} {_boxes_word(box_count)}  |  "
         f"timeLimitSeconds = {WORKER_TIME_LIMIT_SECONDS}",
         "",
         (
@@ -1507,13 +1571,12 @@ def write_solution_worker(
         )
     lines.append("")
     lines.append("Решение:")
-    for step, move in enumerate(path, 1):
-        move_type, direction, distance = move
-        label = _WORKER_MOVE_LABELS[(move_type, direction)]
-        if move_type == "jump" and distance > 1:
-            label = f"{label} ({distance} клетки)"
-        suffix = "  <-- ПОБЕДА" if step == n else ""
-        lines.append(f"    {step}. {label}{suffix}")
+    delivery_count = len(deliveries)
+    for step, (box_id, (fx, fy), (tx, ty)) in enumerate(deliveries, 1):
+        suffix = "  <-- ПОБЕДА" if step == delivery_count else ""
+        lines.append(
+            f"    {step}. {box_id:<10} ({fx},{fy}) -> ({tx},{ty}){suffix}"
+        )
     os.makedirs(solutions_dir, exist_ok=True)
     out_path = os.path.join(solutions_dir, f"{lid}.txt")
     with open(out_path, "w", encoding="utf-8") as f:
@@ -1617,6 +1680,31 @@ def _sig_worker(
     )
 
 
+def load_worker_level(fpath: str) -> Tuple[
+    List[Box], Set[Tuple[int, int]], int, int, int
+]:
+    """Загружает один уровень режима Worker из JSON-файла. Возвращает
+    (boxes, blocked, start_x, start_y, facing)."""
+    with open(fpath, encoding="utf-8") as f:
+        data = json.load(f)
+    boxes = [
+        Box(
+            b.get("id", ""), b["x"], b["y"],
+            b.get("width", 1), b.get("height", 1),
+            b.get("isTarget", False),
+        )
+        for b in data["boxes"]
+    ]
+    blocked: Set[Tuple[int, int]] = {
+        (c["x"], c["y"]) for c in data.get("blockedCells", [])
+    }
+    facing = -1 if data.get("workerFacing") == "left" else 1
+    return (
+        boxes, blocked,
+        data.get("workerStartX", 0), data.get("workerStartY", 0), facing,
+    )
+
+
 def load_existing_signatures_worker(output_dir: str) -> Set[str]:
     """Загружает подписи всех существующих уровней режима Worker."""
     sigs: Set[str] = set()
@@ -1627,30 +1715,83 @@ def load_existing_signatures_worker(output_dir: str) -> Set[str]:
             continue
         fpath = os.path.join(output_dir, fname)
         try:
-            with open(fpath, encoding="utf-8") as f:
-                data = json.load(f)
-            boxes = [
-                Box(
-                    b.get("id", ""), b["x"], b["y"],
-                    b.get("width", 1), b.get("height", 1),
-                    b.get("isTarget", False),
-                )
-                for b in data["boxes"]
-            ]
-            blocked: Set[Tuple[int, int]] = {
-                (c["x"], c["y"]) for c in data.get("blockedCells", [])
-            }
-            facing = -1 if data.get("workerFacing") == "left" else 1
-            sigs.add(_sig_worker(
-                boxes,
-                blocked,
-                data.get("workerStartX", 0),
-                data.get("workerStartY", 0),
-                facing,
-            ))
+            boxes, blocked, start_x, start_y, facing = load_worker_level(
+                fpath
+            )
+            sigs.add(
+                _sig_worker(boxes, blocked, start_x, start_y, facing)
+            )
         except Exception:
             pass
     return sigs
+
+
+def regenerate_worker_solutions(
+    levels_dir: str = WORKER_OUTPUT_DIR,
+    solutions_dir: str = WORKER_SOLUTIONS_DIR,
+    max_depth: int = 80,
+    max_states: int = 300_000,
+    log: Optional[Any] = None,
+) -> Tuple[List[str], List[str]]:
+    """
+    Прогоняет solve_worker_with_path() по КАЖДОМУ уже существующему
+    уровню режима Worker в levels_dir и (пере)записывает его решение в
+    solutions_dir/<lid>.txt - актуально после изменения правил (#152,
+    #153) или самого формата решения: старые решения могли быть
+    получены по устаревшей модели или использовать старый формат
+    записи. Возвращает (решённые, нерешённые) - списки id уровней;
+    нерешённые не трогаются (их старый .txt файл, если был, остаётся
+    как есть - решение не удаляется, если решатель вдруг не смог найти
+    новое за отведённый бюджет).
+
+    log, если передан, вызывается с одной строкой прогресса на
+    уровень (для вывода в консоль или в лог GUI).
+    """
+    solved: List[str] = []
+    unsolved: List[str] = []
+    if not os.path.isdir(levels_dir):
+        return solved, unsolved
+
+    fnames = sorted(
+        fname for fname in os.listdir(levels_dir)
+        if fname.startswith("campaign_") and fname.endswith(".json")
+    )
+    for fname in fnames:
+        lid = fname[:-5]
+        fpath = os.path.join(levels_dir, fname)
+        try:
+            boxes, blocked, start_x, start_y, facing = load_worker_level(
+                fpath
+            )
+        except Exception as exc:
+            unsolved.append(lid)
+            if log:
+                log(f"{lid}: не удалось загрузить уровень ({exc})")
+            continue
+
+        path = solve_worker_with_path(
+            boxes, blocked, GRID_W, start_x, start_y, facing,
+            max_depth=max_depth, max_states=max_states,
+        )
+        if path is None:
+            unsolved.append(lid)
+            if log:
+                log(f"{lid}: решение не найдено")
+            continue
+
+        write_solution_worker(
+            lid, boxes, blocked, start_x, start_y, facing, path,
+            solutions_dir=solutions_dir,
+        )
+        solved.append(lid)
+        if log:
+            deliveries = summarize_worker_deliveries(
+                boxes, blocked, GRID_W, start_x, start_y, facing, path
+            )
+            n = len(deliveries)
+            log(f"{lid}: решено, {n} {_boxes_word(n)}")
+
+    return solved, unsolved
 
 
 def generate_one(
@@ -1914,6 +2055,7 @@ def generate_one_worker(
     rng: random.Random,
     seen: Set[str],
     attempts: int = 2000,
+    min_blocked: int = 0,
 ) -> Optional[Tuple[List[Box], Set[Tuple[int, int]], int, int, int, int]]:
     """
     Пытается сгенерировать один валидный уровень режима Worker.
@@ -1931,17 +2073,19 @@ def generate_one_worker(
     _worker_row_would_fill().
     """
     for _ in range(attempts):
-        # По решению пользователя: 0-6 блоков, без смещения к малым
-        # значениям (в отличие от crane/color). В отличие от них же,
-        # клетки выбираются как отдельные (колонка, ряд), а не "1 блок
-        # на колонку" - при высоких n_blocked "1 на колонку" размазывал
-        # бы препятствие сразу по ВСЕМ 6 колонкам (проверено на
-        # практике: при 5-6 блоках так почти всем ящикам отказывает
-        # placement_y(), потому что верх КАЖДОЙ колонки уже занят
-        # блоком). Разрешая 2 блока в одной колонне, часть колонн
+        # По умолчанию (min_blocked=0): 0-6 блоков, без смещения к
+        # малым значениям (в отличие от crane/color) - решение
+        # пользователя. min_blocked поднимает нижнюю границу для тех,
+        # кому нужны уровни ГАРАНТИРОВАННО с препятствиями. В отличие
+        # от crane/color, клетки выбираются как отдельные (колонка,
+        # ряд), а не "1 блок на колонку" - при высоких n_blocked "1 на
+        # колонку" размазывал бы препятствие сразу по ВСЕМ 6 колонкам
+        # (проверено на практике: при 5-6 блоках так почти всем ящикам
+        # отказывает placement_y(), потому что верх КАЖДОЙ колонки уже
+        # занят блоком). Разрешая 2 блока в одной колонне, часть колонн
         # остаётся полностью свободной даже при большом n_blocked.
         blocked: Set[Tuple[int, int]] = set()
-        n_blocked = rng.randint(0, 6)
+        n_blocked = rng.randint(min(min_blocked, 6), 6)
         if n_blocked:
             cell_candidates = [
                 (x, y) for x in range(GRID_W) for y in (3, 4)
@@ -2236,6 +2380,17 @@ class App(tk.Tk):
         self._colors_row = 5
         self._colors_grid_kwargs = p
         self._vars["colors"] = colors_v
+
+        self._min_blocked_label = ttk.Label(frm, text="Мин. блоков:")
+        min_blocked_v = tk.IntVar(value=0)
+        self._min_blocked_spin = ttk.Spinbox(
+            frm, textvariable=min_blocked_v, from_=0, to=6,
+            increment=1, width=10,
+        )
+        self._min_blocked_row = 5
+        self._min_blocked_grid_kwargs = p
+        self._vars["min_blocked"] = min_blocked_v
+
         self._on_mode_changed()  # показать/скрыть по стартовому режиму
 
         # ── Кнопка ──
@@ -2262,10 +2417,11 @@ class App(tk.Tk):
 
     def _on_mode_changed(self, event: Any = None) -> None:
         """
-        Показывает поле «Количество цветов» только для Color Matching и
-        переключает мин./макс. действий на разумные значения по умолчанию:
-        у Worker решение состоит из мелких пошаговых действий рабочего,
-        а не укрупнённых ходов крана, поэтому диапазон заметно шире.
+        Показывает поле «Количество цветов» только для Color Matching,
+        «Мин. блоков» только для Worker, и переключает мин./макс.
+        действий на разумные значения по умолчанию: у Worker решение
+        состоит из мелких пошаговых действий рабочего, а не укрупнённых
+        ходов крана, поэтому диапазон заметно шире.
         """
         mode = self._vars["mode"].get()
         if mode == "Color Matching":
@@ -2280,6 +2436,19 @@ class App(tk.Tk):
         else:
             self._colors_label.grid_remove()
             self._colors_combo.grid_remove()
+
+        if mode == "Worker":
+            self._min_blocked_label.grid(
+                row=self._min_blocked_row, column=0, sticky="w",
+                **self._min_blocked_grid_kwargs
+            )
+            self._min_blocked_spin.grid(
+                row=self._min_blocked_row, column=1, sticky="w",
+                **self._min_blocked_grid_kwargs
+            )
+        else:
+            self._min_blocked_label.grid_remove()
+            self._min_blocked_spin.grid_remove()
 
         if mode == "Worker":
             self._vars["min_moves"].set(10)
@@ -2331,6 +2500,9 @@ class App(tk.Tk):
         is_color = mode == "Color Matching"
         is_worker = mode == "Worker"
         color_count = int(self._vars["colors"].get()) if is_color else 0
+        min_blocked: int = (
+            self._vars["min_blocked"].get() if is_worker else 0
+        )
 
         if is_worker:
             output_dir = WORKER_OUTPUT_DIR
@@ -2359,6 +2531,7 @@ class App(tk.Tk):
             f"{'Действий' if is_worker else 'Ходов'}: {min_moves}–{max_moves},"
             f" заполненность ≥ {min_fill:.0f}%"
             + (f", цветов: {color_count}" if is_color else "")
+            + (f", блоков ≥ {min_blocked}" if is_worker else "")
         )
         self._log(
             f"Уже существует уровней: {len(seen)} (дубли будут пропущены)\n"
@@ -2374,7 +2547,8 @@ class App(tk.Tk):
             result: Any
             if is_worker:
                 result = generate_one_worker(
-                    min_moves, max_moves, min_fill, rng, seen
+                    min_moves, max_moves, min_fill, rng, seen,
+                    min_blocked=min_blocked,
                 )
             elif is_color:
                 result = generate_one_color(
