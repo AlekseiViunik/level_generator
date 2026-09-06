@@ -5,6 +5,7 @@
 """
 
 import json
+import math
 import os
 import random
 import threading
@@ -48,9 +49,22 @@ WORKER_SOLUTIONS_DIR = os.path.normpath(
 
 # Соответствует WorkerGameRules в storage_controller.
 WORKER_TIME_LIMIT_SECONDS = 999
+# Два разных понятия с одинаковым числовым значением сегодня (как и в
+# C#): MAX_COLUMN_HEIGHT - потолок для СТОПКИ ящиков при размещении,
+# MAXIMUM_ACTION_ROW - самая верхняя строка, которую может занять тело
+# рабочего или переносимый ящик (на неё ничего никогда не кладут, но
+# стоять/прыгать через неё можно) - см. WorkerGameRules.MaximumActionRow.
 WORKER_MAX_COLUMN_HEIGHT = GRID_H
+WORKER_MAXIMUM_ACTION_ROW = GRID_H
 WORKER_EMPTY_JUMP_HEIGHT = 2
 WORKER_CARRYING_JUMP_HEIGHT = 1
+# Issue #153: на сколько колонок вперёд может унести прыжок, "если
+# препятствия позволяют" - см. WorkerGameRules.JumpHorizontalReach.
+WORKER_JUMP_HORIZONTAL_REACH = 2
+# Worker поддерживает только 1x1, широкий (2x1) и высокий (1x2) ящики -
+# в отличие от crane/color, 2x2 здесь не разрешён
+# (WorkerGameRules.IsAllowedBoxSize).
+WORKER_ALLOWED_SIZES: List[Tuple[int, int]] = [(1, 1), (2, 1), (1, 2)]
 
 ALLOWED_SIZES: List[Tuple[int, int]] = [
     (1, 1), (2, 1), (1, 2), (2, 2), (3, 2), (2, 3),
@@ -748,119 +762,534 @@ def solve_color_with_path(
 
 
 # ─── BFS-решатель для режима Worker ──────────────────────────────────────────
-# Ящики в этом режиме всегда 1x1, поэтому позиция ящика однозначно задаёт
-# занимаемую им единственную клетку. Состояние решателя: позиции
-# установленных ящиков (None у переносимого — он снят с сетки, как и в
-# WorkerState.InstalledBoxPositions на стороне игры), позиция и направление
-# рабочего, индекс переносимого ящика (-1, если руки пусты).
+# Полная копия правил WorkerRules.cs/WorkerLevelSolver.cs из storage_controller
+# (issue #152 - широкие/высокие ящики, блокированные ячейки, потолок действия;
+# issue #153 - прыжок с запасом в WORKER_JUMP_HORIZONTAL_REACH колонок и
+# затуханием высоты). Решателю нужна только ДИСКРЕТНАЯ версия правил (шаг на
+# 1 клетку) - непрерывное скольжение и "перенос по инерции" при падении в
+# реальной игре влияют только на рендер, не на решаемость головоломки, так что
+# сюда не портируются.
+#
+# Состояние: позиции установленных ящиков (None у переносимого - он снят с
+# сетки, как и в WorkerState.InstalledBoxPositions на стороне игры), позиция и
+# направление рабочего, индекс переносимого ящика (-1, если руки пусты). X
+# рабочего - float: обычно целое, но ровно X.5 всё время, пока рабочий несёт
+# ШИРОКИЙ (2x1) ящик - при подборе он сдвигается на половину клетки между
+# своей колонкой и колонкой ящика и остаётся там, пока не положит ящик (тот же
+# приём, что уже используется для крана - anchor = x + (w-1)*0.5 в solve()).
 WorkerPositions = Tuple[Optional[Tuple[int, int]], ...]
-WorkerState = Tuple[WorkerPositions, int, int, int, int]
-WorkerMove = Tuple[str, int]  # ("move"/"jump", ±1) или ("pickup"/"putdown", 0)
+WorkerState = Tuple[WorkerPositions, float, int, int, int]
+# ("move"/"jump"/"face", direction, distance) или ("pickup"/"putdown", 0, 0) -
+# distance для jump это реально пройденные колонки (1 или 2), для остальных
+# не используется (всегда 0 или 1, не влияет на решатель).
+WorkerMove = Tuple[str, int, int]
 
 
-def _worker_column_height(positions: WorkerPositions, x: int) -> int:
-    """Высота стопки установленных ящиков в колонне x (0, если пусто)."""
-    height = 0
-    for pos in positions:
-        if pos is not None and pos[0] == x:
-            height = max(height, pos[1] + 1)
-    return height
+def _worker_occ(positions: WorkerPositions, boxes: List[Box]) -> Occ:
+    """Как build_occ(), но positions[i] может быть None (сейчас в руках)."""
+    occ: Occ = {}
+    for i, b in enumerate(boxes):
+        pos = positions[i]
+        if pos is None:
+            continue
+        px, py = pos
+        for dx in range(b.w):
+            for dy in range(b.h):
+                occ[(px + dx, py + dy)] = i
+    return occ
 
 
-def _worker_row_count(positions: WorkerPositions, y: int) -> int:
-    """Число установленных ящиков в ряду y."""
-    return sum(1 for pos in positions if pos is not None and pos[1] == y)
+def _worker_surface_height(
+    occ: Occ, blocked: Set[Tuple[int, int]], x: int
+) -> int:
+    """Топ ящика/блока в колонне x + 1 (аналог GetSurfaceHeight -
+    "приближение сверху", как для прыжка/размещения: плавающее
+    препятствие блокирует весь столбец под собой)."""
+    return col_top(occ, blocked, x) + 1
 
 
-def _worker_top_box(
-    positions: WorkerPositions,
-    x: int,
-) -> Optional[Tuple[int, Tuple[int, int]]]:
-    """(Индекс, позиция) верхнего ящика в колонне x, либо None."""
-    best: Optional[Tuple[int, Tuple[int, int]]] = None
-    for i, pos in enumerate(positions):
-        if pos is not None and pos[0] == x:
-            if best is None or pos[1] > best[1][1]:
-                best = (i, pos)
+def _worker_fall_from(
+    occ: Occ, blocked: Set[Tuple[int, int]], x: int, from_y: int
+) -> int:
+    """Куда рабочий приземлится в колонне x, падая с высоты from_y
+    (аналог FallFrom) - в отличие от _worker_surface_height, не видит
+    ничего ВЫШЕ from_y, так что даёт пройти под плавающим блоком."""
+    y = from_y
+    while y > 0 and (x, y - 1) not in occ and (x, y - 1) not in blocked:
+        y -= 1
+    return y
+
+
+def _worker_row_occupied(
+    occ: Occ, blocked: Set[Tuple[int, int]], y: int, width: int
+) -> int:
+    """Число занятых клеток (ящик или блок) в ряду y."""
+    return sum(1 for x in range(width) if (x, y) in occ or (x, y) in blocked)
+
+
+def _worker_top_box_at(
+    positions: WorkerPositions, boxes: List[Box], x: int
+) -> Optional[int]:
+    """Индекс установленного ящика с наибольшим верхом среди тех, чей
+    [x0, x0+w) содержит колонку x (аналог TryGetTopBox - важно для
+    широких ящиков, не только точное совпадение колонны)."""
+    best: Optional[int] = None
+    best_top = -1
+    for i, b in enumerate(boxes):
+        pos = positions[i]
+        if pos is None:
+            continue
+        px, py = pos
+        if not (px <= x < px + b.w):
+            continue
+        top = py + b.h
+        if top > best_top:
+            best_top = top
+            best = i
     return best
+
+
+def _worker_wide_footprint_clear(
+    occ: Occ,
+    blocked: Set[Tuple[int, int]],
+    center_x: int,
+    row: int,
+    width: int,
+) -> bool:
+    """Свободны ли 3 колонки center_x-1..center_x+1 на высоте row
+    (аналог IsWideCarryFootprintClear)."""
+    if row >= GRID_H:
+        return True
+    for x in range(center_x - 1, center_x + 2):
+        if x < 0 or x >= width:
+            return False
+        if (x, row) in occ or (x, row) in blocked:
+            return False
+    return True
+
+
+def _worker_is_tall_bottom_row(
+    positions: WorkerPositions, boxes: List[Box], row: int
+) -> bool:
+    """Есть ли уже установленный высокий (h=2) ящик с нижней клеткой в
+    этом ряду (аналог IsExistingTallBoxBottomRow - его нижний ряд
+    освобождён от row-fill reservation)."""
+    for i, b in enumerate(boxes):
+        pos = positions[i]
+        if pos is not None and b.h == 2 and pos[1] == row:
+            return True
+    return False
+
+
+def _worker_row_fill_denied(
+    occ: Occ,
+    blocked: Set[Tuple[int, int]],
+    positions: WorkerPositions,
+    boxes: List[Box],
+    width: int,
+    row: int,
+    cells_added: int,
+    is_this_row_a_tall_bottom_row: bool,
+) -> bool:
+    """Заполнит ли добавление cells_added клеток в row ряд ПОЛНОСТЬЮ -
+    запрещено, кроме нижнего ряда высокого ящика (аналог
+    IsRowFillDenied)."""
+    if is_this_row_a_tall_bottom_row or _worker_is_tall_bottom_row(
+        positions, boxes, row
+    ):
+        return False
+    return _worker_row_occupied(occ, blocked, row, width) + cells_added >= width
+
+
+def _worker_start_column_max_rise(
+    occ: Occ,
+    blocked: Set[Tuple[int, int]],
+    column: int,
+    from_y: int,
+    carried_height: int,
+) -> int:
+    """Насколько высоко рабочий (и переносимый ящик над ним) может
+    подняться строго вверх в СВОЕЙ колонне, прежде чем что-то сверху
+    заблокирует дальнейший подъём (аналог GetStartColumnMaxRise)."""
+    rise = 0
+    while from_y + rise + 1 <= WORKER_MAXIMUM_ACTION_ROW:
+        worker_row = from_y + rise + 1
+        if worker_row < GRID_H and (
+            (column, worker_row) in occ or (column, worker_row) in blocked
+        ):
+            break
+
+        box_blocked = False
+        for box_row in range(worker_row + 1, worker_row + carried_height + 1):
+            if box_row > WORKER_MAXIMUM_ACTION_ROW or (
+                box_row < GRID_H
+                and ((column, box_row) in occ or (column, box_row) in blocked)
+            ):
+                box_blocked = True
+                break
+        if box_blocked:
+            break
+
+        rise += 1
+
+    return rise
+
+
+def _worker_can_move_step(
+    occ: Occ,
+    blocked: Set[Tuple[int, int]],
+    boxes: List[Box],
+    width: int,
+    wx: float,
+    wy: int,
+    carried: int,
+    direction: int,
+) -> Optional[Tuple[float, int]]:
+    """Один дискретный шаг Move в direction - (new_wx, new_wy) или None
+    (аналог WorkerRules.CanMove на 1 клетку/half-клетку)."""
+    carried_box = boxes[carried] if carried >= 0 else None
+    carried_height = carried_box.h if carried_box is not None else 0
+
+    column = (
+        math.floor(wx) + 1 if direction > 0 else math.ceil(wx) - 1
+    )
+    if column < 0 or column >= width:
+        return None
+
+    for row_offset in range(carried_height + 1):
+        row = wy + row_offset
+        if row < GRID_H and ((column, row) in occ or (column, row) in blocked):
+            return None
+
+    landing_y = _worker_fall_from(occ, blocked, column, wy)
+
+    if carried_box is not None and carried_box.w == 2:
+        if not _worker_wide_footprint_clear(
+            occ, blocked, column, landing_y + 1, width
+        ):
+            return None
+
+    return (wx + direction, landing_y)
+
+
+def _worker_can_jump(
+    occ: Occ,
+    blocked: Set[Tuple[int, int]],
+    boxes: List[Box],
+    width: int,
+    wx: float,
+    wy: int,
+    carried: int,
+    direction: int,
+) -> Optional[Tuple[int, int, int]]:
+    """Прыжок в direction (±1) - (колонка, высота, реальная дистанция
+    1 или 2) или None (аналог WorkerRules.CanJump: ближайшая колонка с
+    настоящим подъёмом побеждает сразу; колонка не выше старта
+    запоминается как fallback, пока есть запас дальше; свес широкого
+    переносимого ящика - единственная причина пробовать следующий шаг
+    вместо отказа)."""
+    start_column = round(wx)
+    carried_box = boxes[carried] if carried >= 0 else None
+    # "Тяжёлый" переносимый ящик - любой не 1x1 (широкий ИЛИ высокий),
+    # как CellCount==2 в C#.
+    carried_is_heavy = carried_box is not None and carried_box.w * carried_box.h == 2
+
+    raw_max_rise = (
+        0 if carried_is_heavy
+        else WORKER_CARRYING_JUMP_HEIGHT if carried_box is not None
+        else WORKER_EMPTY_JUMP_HEIGHT
+    )
+    carried_top_extra = carried_box.h if carried_box is not None else 0
+    ceiling_cap = WORKER_MAXIMUM_ACTION_ROW - wy - carried_top_extra
+    start_column_cap = _worker_start_column_max_rise(
+        occ, blocked, start_column, wy, carried_top_extra
+    )
+
+    fallback: Optional[Tuple[int, int, int]] = None
+
+    for step in range(1, WORKER_JUMP_HORIZONTAL_REACH + 1):
+        candidate_column = start_column + direction * step
+        if candidate_column < 0 or candidate_column >= width:
+            break
+
+        step_max_rise = (
+            max(0, raw_max_rise - (step - 1))
+            if carried_box is None
+            else raw_max_rise
+        )
+        effective_max_rise = min(step_max_rise, ceiling_cap, start_column_cap)
+
+        candidate_height = _worker_surface_height(occ, blocked, candidate_column)
+        if candidate_height - wy > effective_max_rise:
+            break
+
+        if carried_box is not None and carried_box.w == 2:
+            if not _worker_wide_footprint_clear(
+                occ, blocked, candidate_column, candidate_height + 1, width
+            ):
+                continue
+
+        is_genuine_rise = candidate_height > wy
+        if (
+            carried_box is None
+            and not is_genuine_rise
+            and step < WORKER_JUMP_HORIZONTAL_REACH
+        ):
+            fallback = (candidate_column, candidate_height, step)
+            continue
+
+        return (candidate_column, candidate_height, step)
+
+    return fallback
+
+
+def _worker_placement_column(
+    occ: Occ,
+    blocked: Set[Tuple[int, int]],
+    wx: float,
+    wy: int,
+    facing: int,
+    width: int,
+) -> int:
+    """Куда переставится рабочий при выкладывании ящика - "позади"
+    (колонка, противоположная facing) если валидна и свободна на
+    высоте wy, иначе "спереди" (аналог GetPlacementWorkerColumn)."""
+    behind_column = math.floor(wx) if facing > 0 else math.ceil(wx)
+    front_column = math.ceil(wx) if facing > 0 else math.floor(wx)
+
+    def is_valid(column: int) -> bool:
+        return (
+            0 <= column < width
+            and (column, wy) not in occ
+            and (column, wy) not in blocked
+        )
+
+    return behind_column if is_valid(behind_column) else front_column
+
+
+def _worker_can_pick_up(
+    occ: Occ,
+    blocked: Set[Tuple[int, int]],
+    positions: WorkerPositions,
+    boxes: List[Box],
+    wx: float,
+    wy: int,
+    adjacent_x: int,
+) -> Optional[int]:
+    """Индекс ящика, который можно подобрать в колонне adjacent_x, или
+    None (аналог CanPickUp: окно досягаемости по высоте + свободна ли
+    вся колонка РАБОЧЕГО на высотах, которые займёт переносимый ящик)."""
+    box_index = _worker_top_box_at(positions, boxes, adjacent_x)
+    if box_index is None:
+        return None
+
+    box = boxes[box_index]
+    pos = positions[box_index]
+    assert pos is not None
+    box_y = pos[1]
+
+    reach_ok = (
+        wy - 1 <= box_y <= wy + 1 if box.h == 2 else wy <= box_y <= wy + 1
+    )
+    if not reach_ok:
+        return None
+
+    worker_column = round(wx)
+    for row_offset in range(1, box.h + 1):
+        carried_row = wy + row_offset
+        if carried_row < GRID_H and (
+            (worker_column, carried_row) in occ
+            or (worker_column, carried_row) in blocked
+        ):
+            return None
+
+    return box_index
+
+
+def _worker_can_place_single(
+    occ: Occ,
+    blocked: Set[Tuple[int, int]],
+    positions: WorkerPositions,
+    boxes: List[Box],
+    width: int,
+    wy: int,
+    adjacent_x: int,
+    box: Box,
+) -> Optional[Tuple[int, int]]:
+    column_height = _worker_surface_height(occ, blocked, adjacent_x)
+    if column_height + box.h > WORKER_MAX_COLUMN_HEIGHT:
+        return None
+    if column_height > wy + 1:
+        return None
+
+    is_delivery = box.is_target and adjacent_x == width - 1 and column_height == 0
+    is_tall = box.h == 2
+    if _worker_row_fill_denied(
+        occ, blocked, positions, boxes, width, column_height, 1, is_tall
+    ) and not is_delivery:
+        return None
+
+    if is_tall and _worker_row_fill_denied(
+        occ, blocked, positions, boxes, width, column_height + 1, 1, False
+    ) and not is_delivery:
+        return None
+
+    return (adjacent_x, column_height)
+
+
+def _worker_can_place_wide(
+    occ: Occ,
+    blocked: Set[Tuple[int, int]],
+    positions: WorkerPositions,
+    boxes: List[Box],
+    width: int,
+    wy: int,
+    adjacent_x: int,
+    facing: int,
+    box: Box,
+) -> Optional[Tuple[int, int]]:
+    other_x = adjacent_x + facing
+    left_x = min(adjacent_x, other_x)
+    if left_x < 0 or left_x + 1 >= width:
+        return None
+
+    left_height = _worker_surface_height(occ, blocked, left_x)
+    right_height = _worker_surface_height(occ, blocked, left_x + 1)
+    if left_height != right_height:
+        return None
+
+    column_height = left_height
+    if column_height + 1 > WORKER_MAX_COLUMN_HEIGHT:
+        return None
+    if column_height > wy + 1:
+        return None
+
+    is_delivery = box.is_target and left_x == width - 1 and column_height == 0
+    if _worker_row_fill_denied(
+        occ, blocked, positions, boxes, width, column_height, 2, False
+    ) and not is_delivery:
+        return None
+
+    return (left_x, column_height)
+
+
+def _worker_can_place(
+    occ: Occ,
+    blocked: Set[Tuple[int, int]],
+    positions: WorkerPositions,
+    boxes: List[Box],
+    width: int,
+    wy: int,
+    adjacent_x: int,
+    facing: int,
+    carried: int,
+) -> Optional[Tuple[int, int]]:
+    """(x, y) куда встанет переносимый ящик, или None (аналог
+    CanPlace/CanPlaceSingleColumn/CanPlaceWide)."""
+    box = boxes[carried]
+    if box.w == 2:
+        return _worker_can_place_wide(
+            occ, blocked, positions, boxes, width, wy, adjacent_x, facing, box
+        )
+    return _worker_can_place_single(
+        occ, blocked, positions, boxes, width, wy, adjacent_x, box
+    )
 
 
 def _worker_transitions(
     boxes: List[Box],
+    blocked: Set[Tuple[int, int]],
     width: int,
     state: WorkerState,
 ) -> List[Tuple[WorkerState, WorkerMove, bool]]:
     """
     Возвращает список (новое_состояние, действие, доставлена_ли_цель)
-    для всех допустимых действий рабочего из state. Симулирует точную
-    механику WorkerRules.CanMove/CanJump/CanInteract (без прыжка на месте —
-    он не меняет состояние и решателю бесполезен).
+    для всех допустимых действий рабочего из state. Точная копия
+    структуры WorkerLevelSolver.Expand(): move/jump в направлении,
+    противоположном текущему facing, недоступны напрямую - сначала
+    нужно развернуться (действие "face", тоже расходует шаг, как в
+    реальной игре/решателе). Прыжок на месте (direction=0) решателю не
+    нужен - он не меняет состояние.
     """
     positions, wx, wy, facing, carried = state
+    occ = _worker_occ(positions, boxes)
     results: List[Tuple[WorkerState, WorkerMove, bool]] = []
 
-    # Move: шаг в соседнюю колонну, только если она не выше рабочего.
     for direction in (-1, 1):
-        tx = wx + direction
-        if tx < 0 or tx >= width:
+        if facing != direction:
+            new_state: WorkerState = (positions, wx, wy, direction, carried)
+            results.append((new_state, ("face", direction, 0), False))
             continue
-        theight = _worker_column_height(positions, tx)
-        if theight <= wy:
-            new_state: WorkerState = (
-                positions, tx, theight, direction, carried
-            )
-            results.append((new_state, ("move", direction), False))
 
-    # Jump: в соседнюю колонну, подъём ограничен в зависимости от переноски.
-    for direction in (-1, 1):
-        tx = wx + direction
-        if tx < 0 or tx >= width:
-            continue
-        theight = _worker_column_height(positions, tx)
-        max_rise = (
-            WORKER_CARRYING_JUMP_HEIGHT
-            if carried >= 0
-            else WORKER_EMPTY_JUMP_HEIGHT
+        move_result = _worker_can_move_step(
+            occ, blocked, boxes, width, wx, wy, carried, direction
         )
-        if theight - wy <= max_rise:
-            new_state = (positions, tx, theight, direction, carried)
-            results.append((new_state, ("jump", direction), False))
+        if move_result is not None:
+            new_wx, new_wy = move_result
+            new_state = (positions, new_wx, new_wy, facing, carried)
+            results.append((new_state, ("move", direction, 1), False))
 
-    # Interact: подобрать/положить в колонне, куда смотрит рабочий.
-    adjacent_x = wx + facing
-    if 0 <= adjacent_x < width:
-        col_height = _worker_column_height(positions, adjacent_x)
-        if carried >= 0:
-            if col_height < WORKER_MAX_COLUMN_HEIGHT:
-                dest = (adjacent_x, col_height)
-                would_fill = _worker_row_count(positions, dest[1]) >= width - 1
+        jump_result = _worker_can_jump(
+            occ, blocked, boxes, width, wx, wy, carried, direction
+        )
+        if jump_result is not None:
+            new_column, new_y, distance = jump_result
+            new_state = (positions, float(new_column), new_y, facing, carried)
+            results.append((new_state, ("jump", direction, distance), False))
+
+    if carried >= 0:
+        placement_column = _worker_placement_column(
+            occ, blocked, wx, wy, facing, width
+        )
+        adjacent_x = placement_column + facing
+        if 0 <= adjacent_x < width:
+            place_result = _worker_can_place(
+                occ, blocked, positions, boxes, width, wy, adjacent_x,
+                facing, carried,
+            )
+            if place_result is not None:
+                dest_x, dest_y = place_result
                 is_delivery = (
                     boxes[carried].is_target
-                    and dest[0] == width - 1
-                    and dest[1] == 0
+                    and dest_x == width - 1
+                    and dest_y == 0
                 )
-                if (not would_fill or is_delivery) and col_height <= wy + 1:
-                    new_positions = list(positions)
-                    new_positions[carried] = dest
-                    new_state = (tuple(new_positions), wx, wy, facing, -1)
-                    results.append((new_state, ("putdown", 0), is_delivery))
-        else:
-            top = _worker_top_box(positions, adjacent_x)
-            if top is not None:
-                top_idx, top_pos = top
-                if wy <= top_pos[1] <= wy + 1:
-                    new_positions = list(positions)
-                    new_positions[top_idx] = None
-                    new_state = (
-                        tuple(new_positions), wx, wy, facing, top_idx
-                    )
-                    results.append((new_state, ("pickup", 0), False))
+                new_positions = list(positions)
+                new_positions[carried] = (dest_x, dest_y)
+                new_state = (
+                    tuple(new_positions),
+                    float(placement_column),
+                    wy,
+                    facing,
+                    -1,
+                )
+                results.append(
+                    (new_state, ("putdown", facing, 0), is_delivery)
+                )
+    else:
+        adjacent_x = round(wx) + facing
+        if 0 <= adjacent_x < width:
+            pick_index = _worker_can_pick_up(
+                occ, blocked, positions, boxes, wx, wy, adjacent_x
+            )
+            if pick_index is not None:
+                box = boxes[pick_index]
+                new_positions = list(positions)
+                new_positions[pick_index] = None
+                new_wx = round(wx) + facing * 0.5 if box.w == 2 else wx
+                new_state = (
+                    tuple(new_positions), new_wx, wy, facing, pick_index
+                )
+                results.append(
+                    (new_state, ("pickup", facing, 0), False)
+                )
 
     return results
 
 
 def solve_worker(
     boxes: List[Box],
+    blocked: Set[Tuple[int, int]],
     width: int,
     start_x: int,
     start_y: int,
@@ -870,12 +1299,14 @@ def solve_worker(
 ) -> int:
     """
     BFS по состояниям рабочего. Возвращает минимальное число действий
-    (move/jump/pickup/putdown) для доставки целевого ящика к выходу
-    (width-1, 0), или -1 если решения нет. Прерывается досрочно при
-    превышении max_states.
+    (move/jump/face/pickup/putdown) для доставки целевого ящика к
+    выходу (width-1, 0), или -1 если решения нет. Прерывается досрочно
+    при превышении max_states.
     """
     initial_positions: WorkerPositions = tuple((b.x, b.y) for b in boxes)
-    initial: WorkerState = (initial_positions, start_x, start_y, facing, -1)
+    initial: WorkerState = (
+        initial_positions, float(start_x), start_y, facing, -1
+    )
     queue: deque = deque([(initial, 0)])
     visited: Set[WorkerState] = {initial}
 
@@ -887,7 +1318,7 @@ def solve_worker(
             continue
 
         for new_state, _move, delivered in _worker_transitions(
-            boxes, width, state
+            boxes, blocked, width, state
         ):
             if delivered:
                 return depth + 1
@@ -900,6 +1331,7 @@ def solve_worker(
 
 def solve_worker_with_path(
     boxes: List[Box],
+    blocked: Set[Tuple[int, int]],
     width: int,
     start_x: int,
     start_y: int,
@@ -909,7 +1341,9 @@ def solve_worker_with_path(
 ) -> Optional[List[WorkerMove]]:
     """Как solve_worker(), но восстанавливает последовательность действий."""
     initial_positions: WorkerPositions = tuple((b.x, b.y) for b in boxes)
-    initial: WorkerState = (initial_positions, start_x, start_y, facing, -1)
+    initial: WorkerState = (
+        initial_positions, float(start_x), start_y, facing, -1
+    )
     came_from: Dict[
         WorkerState, Optional[Tuple[WorkerState, WorkerMove]]
     ] = {initial: None}
@@ -923,7 +1357,7 @@ def solve_worker_with_path(
             continue
 
         for new_state, move, delivered in _worker_transitions(
-            boxes, width, state
+            boxes, blocked, width, state
         ):
             if delivered:
                 path: List[WorkerMove] = []
@@ -1005,16 +1439,21 @@ def write_solution(
 _WORKER_MOVE_LABELS = {
     ("move", -1): "идёт влево",
     ("move", 1): "идёт вправо",
+    ("face", -1): "разворачивается влево",
+    ("face", 1): "разворачивается вправо",
     ("jump", -1): "прыжок влево",
     ("jump", 1): "прыжок вправо",
-    ("pickup", 0): "берёт ящик",
-    ("putdown", 0): "кладёт ящик",
+    ("pickup", -1): "берёт ящик",
+    ("pickup", 1): "берёт ящик",
+    ("putdown", -1): "кладёт ящик",
+    ("putdown", 1): "кладёт ящик",
 }
 
 
 def write_solution_worker(
     lid: str,
     boxes: List[Box],
+    blocked: Set[Tuple[int, int]],
     start_x: int,
     start_y: int,
     facing: int,
@@ -1037,16 +1476,24 @@ def write_solution_worker(
             f"Рабочий: x={start_x}, y={start_y}, лицом "
             f"{'влево' if facing < 0 else 'вправо'}"
         ),
-        "",
-        "Начальные позиции:",
     ]
+    if blocked:
+        lines.append(
+            "Блокированные ячейки: "
+            + ", ".join(f"({x},{y})" for x, y in sorted(blocked))
+        )
+    lines.append("")
+    lines.append("Начальные позиции:")
     for b in boxes:
         target_mark = "  [цель]" if b.is_target else ""
-        lines.append(f"  {b.id:<10} (1x1)  x={b.x}, y={b.y}{target_mark}")
+        lines.append(f"  {b.id:<10} ({b.w}x{b.h})  x={b.x}, y={b.y}{target_mark}")
     lines.append("")
     lines.append("Решение:")
     for step, move in enumerate(path, 1):
-        label = _WORKER_MOVE_LABELS[move]
+        move_type, direction, distance = move
+        label = _WORKER_MOVE_LABELS[(move_type, direction)]
+        if move_type == "jump" and distance > 1:
+            label = f"{label} ({distance} клетки)"
         suffix = "  <-- ПОБЕДА" if step == n else ""
         lines.append(f"    {step}. {label}{suffix}")
     os.makedirs(solutions_dir, exist_ok=True)
@@ -1129,18 +1576,24 @@ def get_next_id(output_dir: str = OUTPUT_DIR) -> int:
 
 def _sig_worker(
     boxes: List[Box],
+    blocked: Set[Tuple[int, int]],
     start_x: int,
     start_y: int,
     facing: int,
 ) -> str:
     """
-    Канонический ключ уровня режима Worker: геометрия ящиков + стартовая
-    позиция/направление рабочего — в этом режиме от них зависит
-    доступность и сложность решения, в отличие от крана, который
-    достаёт любой ящик одинаково откуда угодно.
+    Канонический ключ уровня режима Worker: геометрия ящиков (включая
+    размер - иначе два уровня с одинаковыми якорными клетками, но
+    разными размерами ящиков, ложно считались бы дублями) +
+    блокированные ячейки + стартовая позиция/направление рабочего — в
+    этом режиме от них зависит доступность и сложность решения, в
+    отличие от крана, который достаёт любой ящик одинаково откуда
+    угодно.
     """
-    key = tuple(sorted((b.x, b.y, int(b.is_target)) for b in boxes))
-    return f"{key}|worker=({start_x},{start_y},{facing})"
+    key = tuple(
+        sorted((b.w, b.h, b.x, b.y, int(b.is_target)) for b in boxes)
+    )
+    return f"{key}|blocked={sorted(blocked)}|worker=({start_x},{start_y},{facing})"
 
 
 def load_existing_signatures_worker(output_dir: str) -> Set[str]:
@@ -1157,14 +1610,19 @@ def load_existing_signatures_worker(output_dir: str) -> Set[str]:
                 data = json.load(f)
             boxes = [
                 Box(
-                    b.get("id", ""), b["x"], b["y"], 1, 1,
+                    b.get("id", ""), b["x"], b["y"],
+                    b.get("width", 1), b.get("height", 1),
                     b.get("isTarget", False),
                 )
                 for b in data["boxes"]
             ]
+            blocked: Set[Tuple[int, int]] = {
+                (c["x"], c["y"]) for c in data.get("blockedCells", [])
+            }
             facing = -1 if data.get("workerFacing") == "left" else 1
             sigs.add(_sig_worker(
                 boxes,
+                blocked,
                 data.get("workerStartX", 0),
                 data.get("workerStartY", 0),
                 facing,
@@ -1413,6 +1871,21 @@ def generate_one_color(
     return None
 
 
+def _worker_row_would_fill(
+    occ: Occ, x: int, w: int, y: int, h: int
+) -> bool:
+    """True если размещение ящика w×h в (x, y) заполнит целиком хотя бы
+    один из затронутых рядов - защита от полностью занятого ряда уже в
+    СТАРТОВОЙ раскладке (не то же самое, что рантайм-правило
+    WorkerRules.IsRowFillDenied, которое действует только при
+    размещении ящика самим рабочим во время решения)."""
+    for ry in range(y, y + h):
+        existing = sum(1 for (cx, cy) in occ if cy == ry)
+        if existing + w >= GRID_W:
+            return True
+    return False
+
+
 def generate_one_worker(
     min_moves: int,
     max_moves: int,
@@ -1420,95 +1893,124 @@ def generate_one_worker(
     rng: random.Random,
     seen: Set[str],
     attempts: int = 2000,
-) -> Optional[Tuple[List[Box], int, int, int, int]]:
+) -> Optional[Tuple[List[Box], Set[Tuple[int, int]], int, int, int, int]]:
     """
     Пытается сгенерировать один валидный уровень режима Worker.
-    Возвращает (boxes, worker_x, worker_y, worker_facing, min_sol) или None
-    при неудаче. worker_facing: -1 (влево) или 1 (вправо).
+    Возвращает (boxes, blocked, worker_x, worker_y, worker_facing, min_sol)
+    или None при неудаче. worker_facing: -1 (влево) или 1 (вправо).
 
-    Ящики всегда 1x1. Раскладка строится тем же способом, что и опорная
-    геометрия в generate_one() (полная опора снизу, без пересечений), но
-    без выделения целевого ящика заранее — вместо этого им становится
-    случайный уже размещённый ящик (кроме стоящего в клетке выхода), чтобы
-    цель могла естественно оказаться погребена под другими ящиками. Каждое
-    размещение также обязано соблюдать защиту от заполненного ряда: ни один
-    ряд не должен остаться заполненным целиком (WorkerRules.CanInteract
-    проверяет то же самое при переносе).
+    Раскладка строится тем же способом, что и опорная геометрия в
+    generate_one() (полная опора снизу, без пересечений, через уже общие
+    build_occ()/placement_y()) - размер каждого ящика берётся из
+    WORKER_ALLOWED_SIZES, а не всегда 1x1. Без выделения целевого ящика
+    заранее — им становится случайный уже размещённый ящик (кроме
+    перекрывающего клетку выхода), чтобы цель могла естественно
+    оказаться погребена под другими ящиками. Каждое размещение также
+    обязано соблюдать защиту от заполненного ряда - см.
+    _worker_row_would_fill().
     """
     for _ in range(attempts):
-        blocked: Set[Tuple[int, int]] = set()  # Worker не поддерживает блоки
-        occ: Occ = {}
-        placements: List[Tuple[int, int]] = []
+        # По решению пользователя: 0-6 блоков, без смещения к малым
+        # значениям (в отличие от crane/color). В отличие от них же,
+        # клетки выбираются как отдельные (колонка, ряд), а не "1 блок
+        # на колонку" - при высоких n_blocked "1 на колонку" размазывал
+        # бы препятствие сразу по ВСЕМ 6 колонкам (проверено на
+        # практике: при 5-6 блоках так почти всем ящикам отказывает
+        # placement_y(), потому что верх КАЖДОЙ колонки уже занят
+        # блоком). Разрешая 2 блока в одной колонне, часть колонн
+        # остаётся полностью свободной даже при большом n_blocked.
+        blocked: Set[Tuple[int, int]] = set()
+        n_blocked = rng.randint(0, 6)
+        if n_blocked:
+            cell_candidates = [
+                (x, y) for x in range(GRID_W) for y in (3, 4)
+            ]
+            rng.shuffle(cell_candidates)
+            blocked = set(cell_candidates[:n_blocked])
 
-        # Upper bound raised from 10: with a 6x5 grid and the "each row
-        # must keep at least one free cell" placement rule below, the
-        # real physical ceiling is 5 boxes/row * 5 rows = 25 (83% fill).
-        # 22 leaves a bit of headroom under that so the RNG doesn't have
-        # to hit the exact ceiling to succeed, while comfortably covering
-        # fill requests up to ~70%.
+        occ: Occ = {}
+        boxes: List[Box] = []
+
+        # Верхняя граница как в generate_one() - см. комментарий там
+        # (потолок 22 при защите "хотя бы 1 свободная клетка в ряду").
         total_boxes = rng.randint(3, 22)
         for _ in range(total_boxes):
+            w, h = rng.choice(WORKER_ALLOWED_SIZES)
             candidates = []
-            for x in range(GRID_W):
-                y = placement_y(occ, blocked, x, 1, 1)
+            for x in range(GRID_W - w + 1):
+                y = placement_y(occ, blocked, x, w, h)
                 if y is None:
                     continue
-                if sum(1 for (cx, cy) in occ if cy == y) >= GRID_W - 1:
+                if _worker_row_would_fill(occ, x, w, y, h):
                     continue
                 candidates.append((x, y))
             if not candidates:
                 continue
             cx, cy = rng.choice(candidates)
-            occ[(cx, cy)] = len(placements)
-            placements.append((cx, cy))
+            box = Box(f"box_{len(boxes)}", cx, cy, w, h, False)
+            for dx in range(w):
+                for dy in range(h):
+                    occ[(cx + dx, cy + dy)] = len(boxes)
+            boxes.append(box)
 
-        if len(placements) < 2:
+        if len(boxes) < 2:
             continue
 
-        # Целью не может быть ящик, уже стоящий в клетке выхода.
+        # Целью не может быть ящик, чей footprint пересекает клетку
+        # выхода (не только якорная клетка - широкий/высокий ящик может
+        # накрывать её и другой своей клеткой).
+        exit_cell = (GRID_W - 1, 0)
         target_candidates = [
-            i for i, (px, py) in enumerate(placements)
-            if (px, py) != (GRID_W - 1, 0)
+            i for i, b in enumerate(boxes)
+            if exit_cell not in {
+                (b.x + dx, b.y + dy)
+                for dx in range(b.w) for dy in range(b.h)
+            }
         ]
         if not target_candidates:
             continue
         target_i = rng.choice(target_candidates)
+        boxes[target_i].is_target = True
+        boxes[target_i].id = "target"
 
-        tx, ty = placements[target_i]
-        boxes: List[Box] = [Box("target", tx, ty, 1, 1, True)]
-        for i, (px, py) in enumerate(placements):
-            if i == target_i:
-                continue
-            boxes.append(Box(f"box_{len(boxes)}", px, py, 1, 1, False))
-
-        # Проверка минимальной заполненности (ящики всегда 1x1).
-        fill = len(boxes) / (GRID_W * GRID_H) * 100
+        # Проверка минимальной заполненности (по площади, а не по числу
+        # ящиков - актуально теперь, когда ящики разного размера).
+        fill = sum(b.w * b.h for b in boxes) / (GRID_W * GRID_H) * 100
         if fill < min_fill:
             continue
 
-        # Стартовая позиция рабочего: поверх стопки в случайной колонне.
-        start_x = rng.randrange(GRID_W)
-        start_y = 0
+        # Стартовая позиция рабочего: поверх стопки в случайной колонне -
+        # но только среди колонн, где стопка не достаёт до потолка
+        # видимой сетки (иначе рабочий стартовал бы визуально за
+        # пределами игрового поля - редкий, но реальный случай при
+        # высоких/частых стопках, который стоило исключить явно).
+        column_heights = [0] * GRID_W
         for (cx, cy) in occ:
-            if cx == start_x:
-                start_y = max(start_y, cy + 1)
+            column_heights[cx] = max(column_heights[cx], cy + 1)
+        start_candidates = [
+            x for x in range(GRID_W) if column_heights[x] < GRID_H
+        ]
+        if not start_candidates:
+            continue
+        start_x = rng.choice(start_candidates)
+        start_y = column_heights[start_x]
         facing = rng.choice([-1, 1])
 
         # BFS: проверка решаемости и подсчёт минимального числа действий.
         min_sol = solve_worker(
-            boxes, GRID_W, start_x, start_y, facing,
+            boxes, blocked, GRID_W, start_x, start_y, facing,
             max_depth=max_moves + 15,
         )
         if min_sol < 0 or not (min_moves <= min_sol <= max_moves):
             continue
 
         # Проверка уникальности.
-        sig = _sig_worker(boxes, start_x, start_y, facing)
+        sig = _sig_worker(boxes, blocked, start_x, start_y, facing)
         if sig in seen:
             continue
         seen.add(sig)
 
-        return boxes, start_x, start_y, facing, min_sol
+        return boxes, blocked, start_x, start_y, facing, min_sol
 
     return None
 
@@ -1575,6 +2077,7 @@ def level_to_dict_color(
 
 def level_to_dict_worker(
     boxes: List[Box],
+    blocked: Set[Tuple[int, int]],
     start_x: int,
     start_y: int,
     facing: int,
@@ -1597,14 +2100,14 @@ def level_to_dict_worker(
                 "id": b.id,
                 "x": b.x,
                 "y": b.y,
-                "width": 1,
-                "height": 1,
+                "width": b.w,
+                "height": b.h,
                 "isTarget": b.is_target,
                 "visualId": "target" if b.is_target else "standard",
             }
             for b in boxes
         ],
-        "blockedCells": [],
+        "blockedCells": [{"x": x, "y": y} for (x, y) in sorted(blocked)],
     }
 
 
@@ -1844,7 +2347,7 @@ class App(tk.Tk):
 
         for i in range(count):
             # result/sol_path's shape depends on which mode is selected at
-            # runtime (worker's 5-tuple vs. crane/color's box+blocked
+            # runtime (worker's 6-tuple vs. crane/color's box+blocked
             # 3-tuple) - typed loosely on purpose rather than unifying two
             # structurally different shapes into one static type.
             result: Any
@@ -1872,9 +2375,9 @@ class App(tk.Tk):
             lid = f"campaign_{next_id:02d}"
 
             if is_worker:
-                boxes, start_x, start_y, facing, min_sol = result
+                boxes, blocked, start_x, start_y, facing, min_sol = result
                 data = level_to_dict_worker(
-                    boxes, start_x, start_y, facing, lid
+                    boxes, blocked, start_x, start_y, facing, lid
                 )
                 out_path = os.path.join(output_dir, f"{lid}.json")
                 with open(out_path, "w", encoding="utf-8") as f:
@@ -1884,16 +2387,17 @@ class App(tk.Tk):
                         separators=(",", ":"),
                     )
                 sol_path: Any = solve_worker_with_path(
-                    boxes, GRID_W, start_x, start_y, facing,
+                    boxes, blocked, GRID_W, start_x, start_y, facing,
                     max_depth=max_moves + 15,
                 )
                 if sol_path is not None:
                     write_solution_worker(
-                        lid, boxes, start_x, start_y, facing, sol_path,
-                        solutions_dir=solutions_dir,
+                        lid, boxes, blocked, start_x, start_y, facing,
+                        sol_path, solutions_dir=solutions_dir,
                     )
                 self._log(
                     f"[{i+1}/{count}]  {lid}: {len(boxes)} ящ.,  "
+                    f"{len(blocked)} блок.,  "
                     f"{min_sol} действ.,  "
                     f"рабочий=({start_x},{start_y},"
                     f"{'←' if facing < 0 else '→'})"
