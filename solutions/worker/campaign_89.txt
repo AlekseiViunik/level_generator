@@ -1,4 +1,4 @@
-campaign_89  |  10 ящиков  |  timeLimitSeconds = 999
+campaign_89  |  10 ящиков  |  timeLimitSeconds = 55
 
 Сетка: 6x5 (X: 0-5 слева направо, Y: 0-4 снизу вверх)
 
