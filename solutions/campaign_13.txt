@@ -1,15 +1,15 @@
 campaign_13  |  4 ходов  |  liftLimit = 5
 
-Сетка: 6x5 (X: 0-5 слева направо, Y: 0-4 снизу вверх)
+Сетка: 6x5 (колонки A-F слева направо, строки 1-5 снизу вверх)
 
 Начальные позиции:
-  target     (2x3)  x=0, y=0 [цель]
-  bridge     (2x1)  x=0, y=3
-  cap_left   (1x1)  x=0, y=4
-  cap_right  (1x1)  x=1, y=4
+  target     (2x3)  A1 [цель]
+  bridge     (2x1)  A4
+  cap_left   (1x1)  A5
+  cap_right  (1x1)  B5
 
 Решение:
-    1. cap_left   (1x1)  (0,4) -> (2,0)
-    2. cap_right  (1x1)  (1,4) -> (3,0)
-    3. bridge     (2x1)  (0,3) -> (2,1)
-    4. target     (2x3)  (0,0) -> (4,0)  <-- ПОБЕДА
+    1. cap_left   (1x1)  A5 -> C1
+    2. cap_right  (1x1)  B5 -> D1
+    3. bridge     (2x1)  A4 -> C2
+    4. target     (2x3)  A1 -> E1  <-- ПОБЕДА
