@@ -1,27 +1,29 @@
-campaign_163  |  12 ходов  |  liftLimit = 13
+campaign_163  |  15 ходов  |  liftLimit = 16
 
 Сетка: 6x5 (колонки A-F слева направо, строки 1-5 снизу вверх)
 
 Начальные позиции:
-  target     (2x2)  B1  [цель]
-  box_1      (1x1)  B3
-  box_2      (2x2)  E1
-  box_3      (1x1)  B4
-  box_4      (1x1)  B5
-  box_5      (1x1)  C3
-  box_6      (2x1)  E3
-  box_7      (2x2)  E4
+  target     (1x1)  A1  [цель]
+  box_1      (1x1)  A2
+  box_2      (2x1)  C1
+  box_3      (2x3)  E1
+  box_4      (2x3)  C2
+  box_5      (1x2)  A3
+  box_6      (2x1)  C5
 
 Решение:
-    1. box_4      (1x1)  B5 -> D1
-    2. box_3      (1x1)  B4 -> D2
-    3. box_1      (1x1)  B3 -> D3
-    4. box_5      (1x1)  C3 -> D4
-    5. target     (2x2)  B1 -> A1
-    6. box_5      (1x1)  D4 -> C1
-    7. box_1      (1x1)  D3 -> C2
-    8. target     (2x2)  A1 -> C3
-    9. box_7      (2x2)  E4 -> A1
-    10. box_6      (2x1)  E3 -> A3
-    11. box_2      (2x2)  E1 -> A4
-    12. target     (2x2)  C3 -> E1  <-- ПОБЕДА
+    1. box_5      (1x2)  A3 -> B1
+    2. box_6      (2x1)  C5 -> E4
+    3. box_4      (2x3)  C2 -> A3
+    4. box_2      (2x1)  C1 -> E5
+    5. box_4      (2x3)  A3 -> C1
+    6. box_1      (1x1)  A2 -> B3
+    7. target     (1x1)  A1 -> C4
+    8. box_1      (1x1)  B3 -> A1
+    9. box_5      (1x2)  B1 -> A2
+    10. target     (1x1)  C4 -> A4
+    11. box_4      (2x3)  C1 -> B1
+    12. box_2      (2x1)  E5 -> B4
+    13. box_6      (2x1)  E4 -> B5
+    14. box_3      (2x3)  E1 -> D1
+    15. target     (1x1)  A4 -> F1  <-- ПОБЕДА

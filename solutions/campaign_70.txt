@@ -4,17 +4,18 @@ campaign_70  |  7 ходов  |  liftLimit = 8
 
 Начальные позиции:
   target     (2x1)  C1  [цель]
-  box_1      (2x2)  C2
-  box_2      (1x1)  C4
-  box_3      (2x2)  E1
-  box_4      (1x1)  C5
-  box_5      (1x2)  D4
+  box_1      (2x1)  C2
+  box_2      (2x2)  C3
+  box_3      (2x1)  A1
+  box_4      (1x1)  A2
+  box_5      (2x3)  E1
+  box_6      (1x1)  A3
 
 Решение:
-    1. box_4      (1x1)  C5 -> B1
-    2. box_2      (1x1)  C4 -> B2
-    3. box_5      (1x2)  D4 -> A1
-    4. box_1      (2x2)  C2 -> A3
-    5. target     (2x1)  C1 -> A5
-    6. box_3      (2x2)  E1 -> C1
-    7. target     (2x1)  A5 -> E1  <-- ПОБЕДА
+    1. box_2      (2x2)  C3 -> E4
+    2. box_6      (1x1)  A3 -> B2
+    3. box_1      (2x1)  C2 -> A3
+    4. target     (2x1)  C1 -> A4
+    5. box_2      (2x2)  E4 -> C1
+    6. box_5      (2x3)  E1 -> C3
+    7. target     (2x1)  A4 -> E1  <-- ПОБЕДА

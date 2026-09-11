@@ -1,19 +1,16 @@
-campaign_10  |  6 ходов  |  liftLimit = 7
+campaign_10  |  5 ходов  |  liftLimit = 6
 
 Сетка: 6x5 (колонки A-F слева направо, строки 1-5 снизу вверх)
 
 Начальные позиции:
-  target     (1x2)  B1  [цель]  [red]
-  box_1      (2x2)  E1  [red]
-  box_2      (2x1)  E3  [red]
-  box_3      (1x2)  B3  [red]
-  box_4      (2x2)  E4  [red]
-  box_5      (1x1)  C1  [yellow]
+  target     (2x1)  C1  [цель]  [red]
+  box_1      (2x1)  C2  [red]
+  box_2      (2x3)  E1  [yellow]
+  box_3      (2x3)  C3  [red]
 
 Решение:
-    1. box_3      (1x2)  B3 -> D1
-    2. target     (1x2)  B1 -> D3
-    3. box_4      (2x2)  E4 -> A1
-    4. box_2      (2x1)  E3 -> A3
-    5. box_1      (2x2)  E1 -> A4
-    6. target     (1x2)  D3 -> F1  <-- ПОБЕДА
+    1. box_3      (2x3)  C3 -> A1
+    2. box_1      (2x1)  C2 -> A4
+    3. target     (2x1)  C1 -> A5
+    4. box_2      (2x3)  E1 -> C1
+    5. target     (2x1)  A5 -> E1  <-- ПОБЕДА
